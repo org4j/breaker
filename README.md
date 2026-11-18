@@ -1,4 +1,4 @@
-# breaker
+# breaker4j
 
 A circuit breaker for any external network-bound integration (SMS notification aggregators, identity
 providers, payment schemes, or core banking hosts). Plain Java besides the error library, zero external
