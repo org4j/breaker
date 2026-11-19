@@ -1,8 +1,9 @@
-package uz.khakimjanovich.breaker4j;
+package io.github.org4j.breaker;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.org4j.error.GeneralException;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
@@ -20,7 +21,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.ResourceAccessException;
-import uz.khakimjanovich.error4j.GeneralException;
 
 class BreakerTest {
 

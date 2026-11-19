@@ -1,15 +1,15 @@
-package uz.khakimjanovich.breaker4j;
+package io.github.org4j.breaker;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.org4j.error.GeneralException;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.ResourceAccessException;
-import uz.khakimjanovich.error4j.GeneralException;
 
 class BreakerMeterBinderTest {
 

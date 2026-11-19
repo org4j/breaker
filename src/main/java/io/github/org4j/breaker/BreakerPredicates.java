@@ -1,4 +1,4 @@
-package uz.khakimjanovich.breaker4j;
+package io.github.org4j.breaker;
 
 import java.io.IOException;
 import java.util.concurrent.TimeoutException;

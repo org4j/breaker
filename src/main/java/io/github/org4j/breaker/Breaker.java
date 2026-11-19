@@ -1,5 +1,7 @@
-package uz.khakimjanovich.breaker4j;
+package io.github.org4j.breaker;
 
+import io.github.org4j.error.ErrorExceptionStatus;
+import io.github.org4j.error.GeneralException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -8,8 +10,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
-import uz.khakimjanovich.error4j.ErrorExceptionStatus;
-import uz.khakimjanovich.error4j.GeneralException;
 
 public final class Breaker {
 
