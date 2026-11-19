@@ -1,11 +1,11 @@
-# breaker4j
+# breaker
 
 A circuit breaker for any external network-bound integration (SMS notification aggregators, identity
 providers, payment schemes, or core banking hosts). Plain Java besides the error library, zero external
 dependencies: the service configures it from its own settings and registers its own gauge.
 
 ```groovy
-implementation libs.breaker4j
+implementation libs.breaker
 ```
 
 After `failures` consecutive failures in a row the circuit transitions to `OPEN`: `tryAcquire()` returns
@@ -43,7 +43,7 @@ messages in English, Russian, and Uzbek, and a dynamic `Retry-After` header refl
 `BreakerConfig` defines baseline defaults and immutable prototype derivations:
 
 ```java
-// Platform baseline
+// org4j baseline
 var base = BreakerConfig.of(5, Duration.ofSeconds(30));
 
 // Profile for low-latency POS card payment rails (3 failures, 3s probe)
@@ -62,4 +62,4 @@ Gauge.builder("<system>.breaker.state", breaker, b -> b.state().ordinal()).regis
 
 ## Tests
 
-Unit tests only (`./gradlew -p platform :breaker:test`): the breaker has no external infrastructure dependencies.
+Unit tests only (`./gradlew test`): the breaker has no external infrastructure dependencies.

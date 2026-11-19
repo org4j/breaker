@@ -1,11 +1,11 @@
-package uz.khakimjanovich.breaker4j;
+package io.github.org4j.breaker;
 
+import io.github.org4j.error.ErrorExceptionStatus;
+import io.github.org4j.error.GeneralException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.function.Predicate;
-import uz.khakimjanovich.error4j.ErrorExceptionStatus;
-import uz.khakimjanovich.error4j.GeneralException;
 
 public record BreakerConfig(
     String name, int failures, Duration probeAfter, Predicate<Throwable> failurePredicate) {

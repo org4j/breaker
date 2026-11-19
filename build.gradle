@@ -6,11 +6,11 @@ plugins {
 
 dependencies {
     api platform(libs.spring.boot.bom)
-    api libs.error4j // a breaker built with bad settings is a GeneralException
-    runtimeOnly libs.config4j // loads properties/breaker-exception.yaml
+    api libs.error // a breaker built with bad settings is a GeneralException
+    runtimeOnly libs.config // loads properties/breaker-exception.yaml
 
     compileOnly libs.micrometer.core
 
-    testImplementation testFixtures(libs.error4j) // ErrorDefinitions
+    testImplementation testFixtures(libs.error) // ErrorDefinitions
     testImplementation libs.micrometer.core
 }
