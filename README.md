@@ -5,7 +5,7 @@ providers, payment schemes, or core banking hosts). Plain Java besides the error
 dependencies: the service configures it from its own settings and registers its own gauge.
 
 ```groovy
-implementation libs.platform.breaker
+implementation libs.breaker4j
 ```
 
 After `failures` consecutive failures in a row the circuit transitions to `OPEN`: `tryAcquire()` returns

@@ -1,4 +1,4 @@
-package uz.khakimjanovich.platform.breaker;
+package uz.khakimjanovich.breaker4j;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -8,8 +8,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
-import uz.khakimjanovich.platform.error.ErrorExceptionStatus;
-import uz.khakimjanovich.platform.error.GeneralException;
+import uz.khakimjanovich.error4j.ErrorExceptionStatus;
+import uz.khakimjanovich.error4j.GeneralException;
 
 public final class Breaker {
 

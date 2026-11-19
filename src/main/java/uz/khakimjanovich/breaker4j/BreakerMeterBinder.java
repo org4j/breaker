@@ -1,4 +1,4 @@
-package uz.khakimjanovich.platform.breaker;
+package uz.khakimjanovich.breaker4j;
 
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;

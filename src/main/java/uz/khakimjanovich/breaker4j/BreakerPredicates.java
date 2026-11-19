@@ -1,4 +1,4 @@
-package uz.khakimjanovich.platform.breaker;
+package uz.khakimjanovich.breaker4j;
 
 import java.io.IOException;
 import java.util.concurrent.TimeoutException;

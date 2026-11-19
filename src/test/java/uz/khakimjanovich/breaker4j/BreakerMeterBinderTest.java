@@ -1,4 +1,4 @@
-package uz.khakimjanovich.platform.breaker;
+package uz.khakimjanovich.breaker4j;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -9,7 +9,7 @@ import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.ResourceAccessException;
-import uz.khakimjanovich.platform.error.GeneralException;
+import uz.khakimjanovich.error4j.GeneralException;
 
 class BreakerMeterBinderTest {
 

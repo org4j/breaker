@@ -1,6 +1,6 @@
-package uz.khakimjanovich.platform.breaker;
+package uz.khakimjanovich.breaker4j;
 
-import uz.khakimjanovich.platform.error.StatusThrowable;
+import uz.khakimjanovich.error4j.StatusThrowable;
 
 public enum BreakerExceptionStatus implements StatusThrowable {
   BREAKER_OPEN;

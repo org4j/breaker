@@ -1,4 +1,4 @@
-package uz.khakimjanovich.platform.breaker;
+package uz.khakimjanovich.breaker4j;
 
 public final class BreakerConstants {
 
@@ -6,12 +6,12 @@ public final class BreakerConstants {
 
   public static final String DEFAULT_BREAKER_NAME = "default";
 
-  public static final String BREAKER_STATE_METRIC = "platform.circuit-breaker.state";
+  public static final String BREAKER_STATE_METRIC = "breaker4j.state";
   public static final String BREAKER_FAILURES_METRIC =
-      "platform.circuit-breaker.consecutive-failures";
+      "breaker4j.consecutive-failures";
   public static final String BREAKER_THRESHOLD_METRIC =
-      "platform.circuit-breaker.failure-threshold";
-  public static final String BREAKER_CALLS_METRIC = "platform.circuit-breaker.calls";
+      "breaker4j.failure-threshold";
+  public static final String BREAKER_CALLS_METRIC = "breaker4j.calls";
 
   public static final String NAME_TAG = "name";
   public static final String RESULT_TAG = "result";

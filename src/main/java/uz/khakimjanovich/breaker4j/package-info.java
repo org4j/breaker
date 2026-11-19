@@ -1,4 +1,4 @@
 @NullMarked
-package uz.khakimjanovich.platform.breaker;
+package uz.khakimjanovich.breaker4j;
 
 import org.jspecify.annotations.NullMarked;
