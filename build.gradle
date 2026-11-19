@@ -1,7 +1,7 @@
 // A circuit breaker for one outside system: open after failures in a row, then one probe at a time.
 // Plain Java besides the error library: no beans, no properties, so any service can use it.
 plugins {
-    alias(libs.plugins.platform.library)
+    alias(libs.plugins.conventions.library)
 }
 
 dependencies {
