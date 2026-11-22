@@ -7,87 +7,77 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.function.Predicate;
 
+/**
+ * How a {@link Breaker} behaves. Immutable: a service keeps one base and derives a profile per
+ * outside system with the {@code with} methods. A bad setting is a {@link GeneralException} {@code
+ * INTERNAL_ERROR} with a sub-error naming it.
+ *
+ * {@snippet :
+ * var base = BreakerConfig.of(5, Duration.ofSeconds(30));
+ * var cards = base.withName("cards").withFailures(3).withProbeAfter(Duration.ofSeconds(3));
+ * var breaker = cards.create();
+ * }
+ *
+ * @param name names the breaker in metrics; {@value BreakerConstants#DEFAULT_BREAKER_NAME} by
+ *     default
+ * @param failures how many failures in a row open the breaker; at least 1
+ * @param probeAfter how long the breaker stays open before a probe; positive
+ * @param failurePredicate which exceptions are the outside system's failures; {@link
+ *     BreakerPredicates#defaultPredicate()} by default
+ */
 public record BreakerConfig(
     String name, int failures, Duration probeAfter, Predicate<Throwable> failurePredicate) {
 
   public BreakerConfig {
     Objects.requireNonNull(name, "name must not be null");
+    Objects.requireNonNull(probeAfter, "probeAfter must not be null");
+    Objects.requireNonNull(failurePredicate, "failurePredicate must not be null");
     if (name.isBlank()) {
-      throw new GeneralException(ErrorExceptionStatus.INTERNAL_ERROR)
-          .subError("name", "must not be blank");
+      throw invalid("name", "must not be blank");
     }
     if (failures < 1) {
-      throw new GeneralException(ErrorExceptionStatus.INTERNAL_ERROR)
-          .subError("failures", "must be at least 1, not " + failures);
+      throw invalid("failures", "must be at least 1, not " + failures);
     }
     if (!probeAfter.isPositive()) {
-      throw new GeneralException(ErrorExceptionStatus.INTERNAL_ERROR)
-          .subError("probeAfter", "must be positive, not " + probeAfter);
+      throw invalid("probeAfter", "must be positive, not " + probeAfter);
     }
-    Objects.requireNonNull(failurePredicate, "failurePredicate must not be null");
-  }
-
-  public BreakerConfig(int failures, Duration probeAfter, Predicate<Throwable> failurePredicate) {
-    this(BreakerConstants.DEFAULT_BREAKER_NAME, failures, probeAfter, failurePredicate);
   }
 
   public static BreakerConfig of(int failures, Duration probeAfter) {
-    return new BreakerConfig(
-        BreakerConstants.DEFAULT_BREAKER_NAME,
-        failures,
-        probeAfter,
-        BreakerPredicates.defaultPredicate());
+    return of(BreakerConstants.DEFAULT_BREAKER_NAME, failures, probeAfter);
   }
 
   public static BreakerConfig of(String name, int failures, Duration probeAfter) {
     return new BreakerConfig(name, failures, probeAfter, BreakerPredicates.defaultPredicate());
   }
 
-  public static BreakerConfig of(
-      int failures, Duration probeAfter, Predicate<Throwable> failurePredicate) {
-    return new BreakerConfig(
-        BreakerConstants.DEFAULT_BREAKER_NAME, failures, probeAfter, failurePredicate);
-  }
-
-  public static BreakerConfig of(
-      String name, int failures, Duration probeAfter, Predicate<Throwable> failurePredicate) {
+  public BreakerConfig withName(String name) {
     return new BreakerConfig(name, failures, probeAfter, failurePredicate);
   }
 
-  public static BreakerConfig from(BreakerConfig base) {
-    return new BreakerConfig(
-        base.name(), base.failures(), base.probeAfter(), base.failurePredicate());
-  }
-
-  public BreakerConfig withName(String name) {
-    return new BreakerConfig(name, this.failures, this.probeAfter, this.failurePredicate);
-  }
-
   public BreakerConfig withFailures(int failures) {
-    return new BreakerConfig(this.name, failures, this.probeAfter, this.failurePredicate);
+    return new BreakerConfig(name, failures, probeAfter, failurePredicate);
   }
 
   public BreakerConfig withProbeAfter(Duration probeAfter) {
-    return new BreakerConfig(this.name, this.failures, probeAfter, this.failurePredicate);
+    return new BreakerConfig(name, failures, probeAfter, failurePredicate);
   }
 
   public BreakerConfig withFailurePredicate(Predicate<Throwable> failurePredicate) {
-    return new BreakerConfig(this.name, this.failures, this.probeAfter, failurePredicate);
+    return new BreakerConfig(name, failures, probeAfter, failurePredicate);
   }
 
+  /** Creates a closed breaker on the system clock (UTC). */
   public Breaker create() {
     return create(Clock.systemUTC());
   }
 
+  /** Creates a closed breaker that reads time from {@code clock}, such as a test clock. */
   public Breaker create(Clock clock) {
-    return new Breaker(name, failures, probeAfter, clock, failurePredicate);
+    return new Breaker(this, clock);
   }
 
-  public Breaker create(String name) {
-    return create(name, Clock.systemUTC());
-  }
-
-  public Breaker create(String name, Clock clock) {
-    return new Breaker(name, failures, probeAfter, clock, failurePredicate);
+  private static GeneralException invalid(String setting, String problem) {
+    return new GeneralException(ErrorExceptionStatus.INTERNAL_ERROR).subError(setting, problem);
   }
 }

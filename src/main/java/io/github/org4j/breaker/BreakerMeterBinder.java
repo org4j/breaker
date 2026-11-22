@@ -1,5 +1,15 @@
 package io.github.org4j.breaker;
 
+import static io.github.org4j.breaker.BreakerConstants.BREAKER_CALLS_METRIC;
+import static io.github.org4j.breaker.BreakerConstants.BREAKER_FAILURES_METRIC;
+import static io.github.org4j.breaker.BreakerConstants.BREAKER_STATE_METRIC;
+import static io.github.org4j.breaker.BreakerConstants.BREAKER_THRESHOLD_METRIC;
+import static io.github.org4j.breaker.BreakerConstants.NAME_TAG;
+import static io.github.org4j.breaker.BreakerConstants.RESULT_FAILURE;
+import static io.github.org4j.breaker.BreakerConstants.RESULT_REJECTED;
+import static io.github.org4j.breaker.BreakerConstants.RESULT_SUCCESS;
+import static io.github.org4j.breaker.BreakerConstants.RESULT_TAG;
+
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -8,7 +18,21 @@ import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.ToDoubleFunction;
 
+/**
+ * Publishes a breaker's meters, tagged {@code name=<breaker name>} plus any given tags:
+ *
+ * <ul>
+ *   <li>{@value BreakerConstants#BREAKER_STATE_METRIC}: 0 closed, 1 half-open, 2 open;
+ *   <li>{@value BreakerConstants#BREAKER_FAILURES_METRIC}: failures in a row;
+ *   <li>{@value BreakerConstants#BREAKER_THRESHOLD_METRIC}: the failures that open it;
+ *   <li>{@value BreakerConstants#BREAKER_CALLS_METRIC}: calls by {@code result}: {@code success},
+ *       {@code failure} or {@code rejected}.
+ * </ul>
+ *
+ * <p>Needs Micrometer on the classpath; the library does not bring it.
+ */
 public final class BreakerMeterBinder implements MeterBinder {
 
   private final Breaker breaker;
@@ -25,45 +49,39 @@ public final class BreakerMeterBinder implements MeterBinder {
 
   @Override
   public void bindTo(MeterRegistry registry) {
-    Tags baseTags = Tags.concat(tags, BreakerConstants.NAME_TAG, breaker.name());
+    var named = Tags.concat(tags, NAME_TAG, breaker.name());
 
-    Gauge.builder(BreakerConstants.BREAKER_STATE_METRIC, breaker, b -> stateToValue(b.state()))
-        .description("State of the circuit breaker (0 = CLOSED, 1 = HALF_OPEN, 2 = OPEN)")
-        .tags(baseTags)
+    Gauge.builder(BREAKER_STATE_METRIC, breaker, b -> level(b.state()))
+        .description("Circuit breaker state: 0 closed, 1 half-open, 2 open")
+        .tags(named)
+        .register(registry);
+    Gauge.builder(BREAKER_FAILURES_METRIC, breaker, Breaker::consecutiveFailures)
+        .description("Failures in a row recorded by the circuit breaker")
+        .tags(named)
+        .register(registry);
+    Gauge.builder(BREAKER_THRESHOLD_METRIC, breaker, b -> b.config().failures())
+        .description("Failures in a row that open the circuit breaker")
+        .tags(named)
         .register(registry);
 
-    Gauge.builder(BreakerConstants.BREAKER_FAILURES_METRIC, breaker, Breaker::consecutiveFailures)
-        .description("Consecutive failure count recorded by the circuit breaker")
-        .tags(baseTags)
-        .register(registry);
+    calls(registry, named, RESULT_SUCCESS, Breaker::successfulCalls);
+    calls(registry, named, RESULT_FAILURE, Breaker::failedCalls);
+    calls(registry, named, RESULT_REJECTED, Breaker::rejectedCalls);
+  }
 
-    Gauge.builder(BreakerConstants.BREAKER_THRESHOLD_METRIC, breaker, Breaker::failures)
-        .description("Configured failure threshold to trip the circuit breaker")
-        .tags(baseTags)
-        .register(registry);
-
-    FunctionCounter.builder(
-            BreakerConstants.BREAKER_CALLS_METRIC, breaker, Breaker::successfulCalls)
-        .description("Total calls executed by the circuit breaker")
-        .tags(baseTags.and(BreakerConstants.RESULT_TAG, BreakerConstants.RESULT_SUCCESS))
-        .register(registry);
-
-    FunctionCounter.builder(BreakerConstants.BREAKER_CALLS_METRIC, breaker, Breaker::failedCalls)
-        .description("Total calls executed by the circuit breaker")
-        .tags(baseTags.and(BreakerConstants.RESULT_TAG, BreakerConstants.RESULT_FAILURE))
-        .register(registry);
-
-    FunctionCounter.builder(BreakerConstants.BREAKER_CALLS_METRIC, breaker, Breaker::rejectedCalls)
-        .description("Total calls executed by the circuit breaker")
-        .tags(baseTags.and(BreakerConstants.RESULT_TAG, BreakerConstants.RESULT_REJECTED))
+  private void calls(
+      MeterRegistry registry, Tags named, String result, ToDoubleFunction<Breaker> count) {
+    FunctionCounter.builder(BREAKER_CALLS_METRIC, breaker, count)
+        .description("Calls through the circuit breaker, by result")
+        .tags(named.and(RESULT_TAG, result))
         .register(registry);
   }
 
-  private static double stateToValue(Breaker.State state) {
+  private static double level(Breaker.State state) {
     return switch (state) {
-      case CLOSED -> 0.0;
-      case HALF_OPEN -> 1.0;
-      case OPEN -> 2.0;
+      case CLOSED -> 0;
+      case HALF_OPEN -> 1;
+      case OPEN -> 2;
     };
   }
 }

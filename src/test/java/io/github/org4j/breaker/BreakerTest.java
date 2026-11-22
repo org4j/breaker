@@ -3,397 +3,380 @@ package io.github.org4j.breaker;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.org4j.error.ErrorExceptionStatus;
 import io.github.org4j.error.GeneralException;
 import java.io.IOException;
-import java.time.Clock;
+import java.io.UncheckedIOException;
 import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.ResourceAccessException;
 
+// The specification of Breaker: when it opens, what it sheds, and how it recovers.
 class BreakerTest {
 
-  static final class TestClock extends Clock {
-    Instant now = Instant.parse("2026-11-10T10:00:00Z");
+  private final TestClock clock = new TestClock();
 
-    @Override
-    public ZoneId getZone() {
-      return ZoneId.of("UTC");
-    }
-
-    @Override
-    public Clock withZone(ZoneId zone) {
-      return this;
-    }
-
-    @Override
-    public Instant instant() {
-      return now;
-    }
+  private Breaker breaker(int failures, Duration probeAfter) {
+    return BreakerConfig.of(failures, probeAfter).create(clock);
   }
 
-  final TestClock clock = new TestClock();
-
-  @Test
-  void smsNotificationGatewayOutageShedsDispatchWhileInvalidPhoneNumbersNeverTrip() {
-    var smsBreaker = new Breaker(3, Duration.ofSeconds(10), clock);
-
-    // 100 invalid recipient phone numbers (client errors: 400 Bad Request / 422 Unprocessable)
-    for (var i = 0; i < 100; i++) {
-      HttpStatus errorStatus =
-          (i % 2 == 0) ? HttpStatus.BAD_REQUEST : HttpStatus.UNPROCESSABLE_CONTENT;
-      assertThatThrownBy(
-              () ->
-                  smsBreaker.execute(
-                      () -> {
-                        throw new HttpClientErrorException(
-                            errorStatus, "Invalid or unallocated phone number");
-                      }))
-          .isInstanceOf(HttpClientErrorException.class);
-
-      assertThat(smsBreaker.isClosed()).isTrue();
-      assertThat(smsBreaker.isOpen()).isFalse();
-    }
-
-    // External SMS broker network outages occur (3 consecutive connection timeouts)
-    for (var i = 0; i < 2; i++) {
-      assertThatThrownBy(
-              () ->
-                  smsBreaker.execute(
-                      () -> {
-                        throw new ResourceAccessException("Connect timeout to SMS broker gateway");
-                      }))
-          .isInstanceOf(ResourceAccessException.class);
-      assertThat(smsBreaker.isClosed()).isTrue();
-    }
-
-    // 3rd network failure trips the breaker to OPEN
-    assertThatThrownBy(
-            () ->
-                smsBreaker.execute(
-                    () -> {
-                      throw new ResourceAccessException("Broker socket closed by remote host");
-                    }))
-        .isInstanceOf(ResourceAccessException.class);
-
-    assertThat(smsBreaker.isOpen()).isTrue();
-    assertThat(smsBreaker.state()).isEqualTo(Breaker.State.OPEN);
-
-    // Immediate subsequent SMS dispatch is shed fast in memory without blocking dispatcher threads
-    assertThatThrownBy(() -> smsBreaker.execute(() -> "never-dispatched"))
-        .isInstanceOf(GeneralException.class)
-        .satisfies(
-            ex -> {
-              var ge = (GeneralException) ex;
-              assertThat(ge.getStatus()).isEqualTo(BreakerExceptionStatus.BREAKER_OPEN);
-              assertThat(ge.getRetryAfter()).isEqualTo(Duration.ofSeconds(10));
-            });
-  }
-
-  @Test
-  void identityProviderOutageFailsFastWhileInvalidUserCredentialsNeverTrip() {
-    var authBreaker = new Breaker(2, Duration.ofSeconds(15), clock);
-
-    // 50 failed user login attempts (wrong passwords / invalid tokens: 401 Unauthorized)
-    for (var i = 0; i < 50; i++) {
-      assertThatThrownBy(
-              () ->
-                  authBreaker.execute(
-                      () -> {
-                        throw new HttpClientErrorException(
-                            HttpStatus.UNAUTHORIZED, "Bad user credentials");
-                      }))
-          .isInstanceOf(HttpClientErrorException.class);
-
-      assertThat(authBreaker.isClosed()).isTrue();
-    }
-
-    // Identity provider crashes (502 Bad Gateway / 503 Unavailable)
-    for (var i = 0; i < 2; i++) {
-      assertThatThrownBy(
-              () ->
-                  authBreaker.execute(
-                      () -> {
-                        throw new HttpServerErrorException(
-                            HttpStatus.BAD_GATEWAY, "Identity provider unavailable");
-                      }))
-          .isInstanceOf(HttpServerErrorException.class);
-    }
-
-    assertThat(authBreaker.isOpen()).isTrue();
-
-    // Shed authentication requests to protect gateway throughput
-    assertThatThrownBy(() -> authBreaker.execute(() -> "authenticated-user"))
-        .isInstanceOf(GeneralException.class);
-  }
-
-  @Test
-  void cardSchemeSwitchOutageTripsFastWhileCardholderDeclinesKeepRailClosed() {
-    var paymentBreaker = new Breaker(3, Duration.ofSeconds(5), clock);
-
-    // Cardholder rejections (wrong PIN, expired card, insufficient funds)
-    for (var i = 0; i < 20; i++) {
-      assertThatThrownBy(
-              () ->
-                  paymentBreaker.execute(
-                      () -> {
-                        throw new HttpClientErrorException(
-                            HttpStatus.UNPROCESSABLE_CONTENT, "Card expired or insufficient funds");
-                      }))
-          .isInstanceOf(HttpClientErrorException.class);
-      assertThat(paymentBreaker.isClosed()).isTrue();
-    }
-
-    // Network connection drop to card scheme switch
-    for (var i = 0; i < 3; i++) {
-      assertThatThrownBy(
-              () ->
-                  paymentBreaker.execute(
-                      () -> {
-                        throw new ResourceAccessException("Card switch timeout");
-                      }))
-          .isInstanceOf(ResourceAccessException.class);
-    }
-
-    assertThat(paymentBreaker.isOpen()).isTrue();
-
-    // Fast-fail at POS terminal
-    assertThatThrownBy(() -> paymentBreaker.execute(() -> "AUTH-OK"))
-        .isInstanceOf(GeneralException.class);
-  }
-
-  @Test
-  void singleFlightCanaryHalfOpenEnforcesStrictIsolationAcrossConcurrentCalls() {
-    var breaker = new Breaker(3, Duration.ofSeconds(5), clock);
-
-    for (var i = 0; i < 3; i++) {
+  private static void open(Breaker breaker) {
+    for (var i = 0; i < breaker.config().failures(); i++) {
       breaker.recordFailure();
     }
-    assertThat(breaker.isOpen()).isTrue();
-
-    // Cooldown duration elapses
-    clock.now = clock.now.plusSeconds(5);
-
-    // First attempt claims single-flight canary probe
-    assertThat(breaker.tryAcquire()).as("First call acquires canary flight").isTrue();
-    assertThat(breaker.state()).isEqualTo(Breaker.State.HALF_OPEN);
-    assertThat(breaker.isHalfOpen()).isTrue();
-
-    // While canary is in-flight, concurrent calls are shed
-    assertThat(breaker.tryAcquire()).as("Concurrent call shed").isFalse();
-    assertThat(breaker.state()).isEqualTo(Breaker.State.HALF_OPEN);
   }
 
-  @Test
-  void canarySuccessRestoresFullTraffic() {
-    var breaker = new Breaker(3, Duration.ofSeconds(5), clock);
-
-    for (var i = 0; i < 3; i++) {
-      breaker.recordFailure();
-    }
-    clock.now = clock.now.plusSeconds(5);
-
-    // Canary probe executes and succeeds
-    var result = breaker.execute(() -> "canary-success");
-    assertThat(result).isEqualTo("canary-success");
-
-    // Circuit heals back to CLOSED
-    assertThat(breaker.isClosed()).isTrue();
-    assertThat(breaker.isOpen()).isFalse();
-    assertThat(breaker.isHalfOpen()).isFalse();
-    assertThat(breaker.state()).isEqualTo(Breaker.State.CLOSED);
-
-    // Regular traffic flows freely
-    assertThat(breaker.tryAcquire()).isTrue();
-  }
-
-  @Test
-  void canaryFailureImmediatelyReTripsAndRenewsCoolingPeriod() {
-    var breaker = new Breaker(3, Duration.ofSeconds(5), clock);
-
-    for (var i = 0; i < 3; i++) {
-      breaker.recordFailure();
-    }
-    clock.now = clock.now.plusSeconds(5);
-
-    // Canary fails because downstream is still unhealthy
+  private static void callThatThrows(Breaker breaker, RuntimeException thrown) {
     assertThatThrownBy(
             () ->
                 breaker.execute(
                     () -> {
-                      throw new HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE);
+                      throw thrown;
                     }))
-        .isInstanceOf(HttpServerErrorException.class);
-
-    // Reverts immediately to OPEN
-    assertThat(breaker.isOpen()).isTrue();
-    assertThat(breaker.isHalfOpen()).isFalse();
-    assertThat(breaker.state()).isEqualTo(Breaker.State.OPEN);
-
-    // Cooldown is renewed from failure instant
-    assertThat(breaker.tryAcquire()).isFalse();
-    clock.now = clock.now.plusSeconds(4);
-    assertThat(breaker.tryAcquire()).isFalse();
-
-    clock.now = clock.now.plusSeconds(1);
-    assertThat(breaker.tryAcquire()).as("Cooldown elapsed, next canary permitted").isTrue();
+        .isSameAs(thrown);
   }
 
-  @Test
-  void abandonedOrHangingProbeIsSafelyReplacedAfterTimeout() {
-    var breaker = new Breaker(3, Duration.ofSeconds(5), clock);
+  @Nested
+  class Closed {
 
-    for (var i = 0; i < 3; i++) {
-      breaker.recordFailure();
+    private final Breaker breaker = breaker(3, Duration.ofSeconds(5));
+
+    @Test
+    void admitsEveryCall() {
+      assertThat(breaker.tryAcquire()).isTrue();
+      assertThat(breaker.execute(() -> "sent")).isEqualTo("sent");
+      assertThat(breaker.state()).isEqualTo(Breaker.State.CLOSED);
+      assertThat(breaker.remainingProbeDelay()).isZero();
     }
-    clock.now = clock.now.plusSeconds(5);
 
-    // Canary admitted but caller hangs / crashes without calling success or failure
-    assertThat(breaker.tryAcquire()).isTrue();
-    assertThat(breaker.isHalfOpen()).isTrue();
+    @Test
+    void opensOnlyAfterFailuresInARow() {
+      breaker.recordFailure();
+      breaker.recordFailure();
+      breaker.recordSuccess();
+      breaker.recordFailure();
+      breaker.recordFailure();
+      assertThat(breaker.isClosed()).isTrue();
 
-    clock.now = clock.now.plusSeconds(4);
-    assertThat(breaker.tryAcquire()).isFalse();
+      breaker.recordFailure();
+      assertThat(breaker.isOpen()).isTrue();
+    }
 
-    // After another probeAfter elapses, hanging probe is safely expired and replaced
-    clock.now = clock.now.plusSeconds(1);
-    assertThat(breaker.tryAcquire()).as("Abandoned probe replaced").isTrue();
+    @Test
+    void neverOpensOnClientErrors() {
+      for (var status :
+          new HttpStatus[] {
+            HttpStatus.BAD_REQUEST, HttpStatus.UNAUTHORIZED, HttpStatus.UNPROCESSABLE_CONTENT
+          }) {
+        for (var i = 0; i < 10; i++) {
+          callThatThrows(breaker, new HttpClientErrorException(status));
+        }
+      }
+      assertThat(breaker.isClosed()).isTrue();
+      assertThat(breaker.consecutiveFailures()).isZero();
+    }
+
+    @Test
+    void opensOnTransportFailuresAndServerErrors() {
+      callThatThrows(breaker, new ResourceAccessException("connect timed out"));
+      callThatThrows(breaker, new HttpServerErrorException(HttpStatus.BAD_GATEWAY));
+      assertThat(breaker.isClosed()).isTrue();
+
+      callThatThrows(breaker, new UncheckedIOException(new IOException("connection reset")));
+      assertThat(breaker.isOpen()).isTrue();
+    }
   }
 
-  @Test
-  void highConcurrencyContentionMaintainsDeterministicTransitionsWithoutCounterDrift()
-      throws Exception {
-    var breaker = new Breaker(5, Duration.ofMillis(50), clock);
-    var threads = 16;
-    var iterations = 200;
-    var executor = Executors.newFixedThreadPool(threads);
-    var startLatch = new CountDownLatch(1);
-    var futures = new ArrayList<Future<?>>();
-    var acquiredCount = new AtomicInteger();
-    var rejectedCount = new AtomicInteger();
+  @Nested
+  class Open {
 
-    for (var t = 0; t < threads; t++) {
-      futures.add(
-          executor.submit(
-              () -> {
-                try {
-                  startLatch.await();
-                  for (var i = 0; i < iterations; i++) {
-                    if (breaker.tryAcquire()) {
-                      acquiredCount.incrementAndGet();
-                      if (i % 7 == 0) {
+    private final Breaker breaker = breaker(3, Duration.ofSeconds(10));
+
+    @Test
+    void shedsCallsWithBreakerOpenAndTheRestOfTheCooldown() {
+      open(breaker);
+      clock.advance(Duration.ofSeconds(4));
+      var ran = new AtomicBoolean();
+
+      assertThatThrownBy(() -> breaker.run(() -> ran.set(true)))
+          .isInstanceOfSatisfying(
+              GeneralException.class,
+              refused -> {
+                assertThat(refused.getStatus()).isEqualTo(BreakerExceptionStatus.BREAKER_OPEN);
+                assertThat(refused.getRetryAfter()).isEqualTo(Duration.ofSeconds(6));
+              });
+      assertThat(ran).isFalse();
+      assertThat(breaker.rejectedCalls()).isEqualTo(1);
+    }
+
+    @Test
+    void countsTheCooldownDown() {
+      open(breaker);
+      assertThat(breaker.remainingProbeDelay()).isEqualTo(Duration.ofSeconds(10));
+
+      clock.advance(Duration.ofSeconds(4));
+      assertThat(breaker.remainingProbeDelay()).isEqualTo(Duration.ofSeconds(6));
+
+      clock.advance(Duration.ofSeconds(10));
+      assertThat(breaker.remainingProbeDelay()).isZero();
+    }
+  }
+
+  @Nested
+  class HalfOpen {
+
+    private final Breaker breaker = breaker(3, Duration.ofSeconds(5));
+
+    @Test
+    void admitsOneProbeAfterTheCooldown() {
+      open(breaker);
+      clock.advance(Duration.ofSeconds(5));
+
+      assertThat(breaker.tryAcquire()).isTrue();
+      assertThat(breaker.state()).isEqualTo(Breaker.State.HALF_OPEN);
+      assertThat(breaker.tryAcquire()).as("a second call while the probe is out").isFalse();
+      assertThat(breaker.isHalfOpen()).isTrue();
+    }
+
+    @Test
+    void closesWhenTheProbeSucceeds() {
+      open(breaker);
+      clock.advance(Duration.ofSeconds(5));
+
+      assertThat(breaker.execute(() -> "probe")).isEqualTo("probe");
+      assertThat(breaker.state()).isEqualTo(Breaker.State.CLOSED);
+      assertThat(breaker.consecutiveFailures()).isZero();
+      assertThat(breaker.tryAcquire()).isTrue();
+    }
+
+    @Test
+    void closesWhenTheProbeGetsAClientError() {
+      open(breaker);
+      clock.advance(Duration.ofSeconds(5));
+
+      callThatThrows(breaker, new HttpClientErrorException(HttpStatus.NOT_FOUND));
+      assertThat(breaker.isClosed()).isTrue();
+    }
+
+    @Test
+    void reopensForAFullCooldownWhenTheProbeFails() {
+      open(breaker);
+      clock.advance(Duration.ofSeconds(5));
+
+      callThatThrows(breaker, new HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE));
+      assertThat(breaker.state()).isEqualTo(Breaker.State.OPEN);
+
+      clock.advance(Duration.ofSeconds(4));
+      assertThat(breaker.tryAcquire()).isFalse();
+      clock.advance(Duration.ofSeconds(1));
+      assertThat(breaker.tryAcquire()).isTrue();
+    }
+
+    @Test
+    void replacesAProbeThatNeverReportsBack() {
+      open(breaker);
+      clock.advance(Duration.ofSeconds(5));
+      assertThat(breaker.tryAcquire()).isTrue();
+
+      clock.advance(Duration.ofSeconds(4));
+      assertThat(breaker.tryAcquire()).isFalse();
+      clock.advance(Duration.ofSeconds(1));
+      assertThat(breaker.tryAcquire()).as("a new probe").isTrue();
+    }
+  }
+
+  @Nested
+  class Execution {
+
+    @Test
+    void runsAnActionWithNoResult() {
+      var breaker = breaker(3, Duration.ofSeconds(5));
+      var count = new AtomicInteger();
+
+      breaker.run(count::incrementAndGet);
+
+      assertThat(count).hasValue(1);
+      assertThat(breaker.successfulCalls()).isEqualTo(1);
+    }
+
+    @Test
+    void usesTheConfiguredPredicate() {
+      var breaker =
+          BreakerConfig.of(1, Duration.ofSeconds(5))
+              .withFailurePredicate(IllegalStateException.class::isInstance)
+              .create(clock);
+
+      callThatThrows(breaker, new IllegalStateException("ledger locked"));
+      assertThat(breaker.isOpen()).isTrue();
+    }
+
+    @Test
+    void letsOneCallUseItsOwnPredicate() {
+      var breaker = breaker(1, Duration.ofSeconds(5));
+
+      assertThatThrownBy(
+              () ->
+                  breaker.execute(
+                      () -> {
+                        throw new HttpClientErrorException(HttpStatus.TOO_MANY_REQUESTS);
+                      },
+                      error -> true))
+          .isInstanceOf(HttpClientErrorException.class);
+      assertThat(breaker.isOpen()).isTrue();
+    }
+
+    @Test
+    void recordsAnErrorByThePredicate() {
+      var breaker = breaker(3, Duration.ofSeconds(5));
+
+      breaker.recordError(new ResourceAccessException("read timed out"));
+      assertThat(breaker.consecutiveFailures()).isEqualTo(1);
+      assertThat(breaker.failedCalls()).isEqualTo(1);
+
+      breaker.recordError(new HttpClientErrorException(HttpStatus.BAD_REQUEST));
+      assertThat(breaker.consecutiveFailures()).isZero();
+      assertThat(breaker.successfulCalls()).isEqualTo(1);
+    }
+
+    @Test
+    void keepsItsCountsRightUnderContention() throws Exception {
+      var breaker = breaker(5, Duration.ofMillis(50));
+      var threads = 16;
+      var iterations = 200;
+      var start = new CountDownLatch(1);
+      var admitted = new AtomicInteger();
+      var refused = new AtomicInteger();
+      var futures = new ArrayList<Future<?>>();
+
+      try (var executor = Executors.newFixedThreadPool(threads)) {
+        for (var t = 0; t < threads; t++) {
+          futures.add(
+              executor.submit(
+                  () -> {
+                    start.await();
+                    for (var i = 0; i < iterations; i++) {
+                      if (!breaker.tryAcquire()) {
+                        refused.incrementAndGet();
+                      } else if (admitted.incrementAndGet() % 7 == 0) {
                         breaker.recordFailure();
                       } else {
                         breaker.recordSuccess();
                       }
-                    } else {
-                      rejectedCount.incrementAndGet();
                     }
-                  }
-                } catch (InterruptedException ex) {
-                  Thread.currentThread().interrupt();
-                }
-              }));
+                    return null;
+                  }));
+        }
+        start.countDown();
+        for (var future : futures) {
+          future.get(10, TimeUnit.SECONDS);
+        }
+      }
+
+      assertThat(admitted.get() + refused.get()).isEqualTo(threads * iterations);
+      assertThat(breaker.successfulCalls() + breaker.failedCalls()).isEqualTo(admitted.get());
+      assertThat(breaker.rejectedCalls()).isEqualTo(refused.get());
+    }
+  }
+
+  @Nested
+  class Classification {
+
+    @Test
+    void blamesTheSystemForTransportProblemsAndServerErrors() {
+      assertThat(BreakerPredicates.isFailure(new IOException("connection reset"))).isTrue();
+      assertThat(BreakerPredicates.isFailure(new TimeoutException("gateway timed out"))).isTrue();
+      assertThat(BreakerPredicates.isFailure(new ResourceAccessException("socket timeout")))
+          .isTrue();
+      assertThat(
+              BreakerPredicates.isFailure(
+                  new HttpServerErrorException(HttpStatus.INTERNAL_SERVER_ERROR)))
+          .isTrue();
+      assertThat(BreakerPredicates.isFailure(new HttpServerErrorException(HttpStatus.BAD_GATEWAY)))
+          .isTrue();
     }
 
-    startLatch.countDown();
-    for (var f : futures) {
-      f.get(10, TimeUnit.SECONDS);
+    @Test
+    void doesNotBlameItForClientErrorsOrOtherExceptions() {
+      assertThat(BreakerPredicates.isFailure(new HttpClientErrorException(HttpStatus.BAD_REQUEST)))
+          .isFalse();
+      assertThat(BreakerPredicates.isFailure(new HttpClientErrorException(HttpStatus.UNAUTHORIZED)))
+          .isFalse();
+      assertThat(BreakerPredicates.isFailure(new IllegalArgumentException("invalid payload")))
+          .isFalse();
     }
-    executor.shutdown();
 
-    assertThat(acquiredCount.get() + rejectedCount.get()).isEqualTo(threads * iterations);
-    assertThat(breaker.state())
-        .isIn(Breaker.State.CLOSED, Breaker.State.OPEN, Breaker.State.HALF_OPEN);
+    @Test
+    void searchesTheWholeCauseChain() {
+      var deep = new RuntimeException(new IllegalStateException(new IOException("broken pipe")));
+      assertThat(BreakerPredicates.isFailure(deep)).isTrue();
+
+      var withCause = new IOException("read failed", new IllegalArgumentException("bad frame"));
+      assertThat(BreakerPredicates.isFailure(withCause)).isTrue();
+
+      var wrappedClientError =
+          new RuntimeException(new HttpClientErrorException(HttpStatus.CONFLICT));
+      assertThat(BreakerPredicates.isFailure(wrappedClientError)).isFalse();
+    }
   }
 
-  @Test
-  void configPrototypeEnablesTailoredProfilesAcrossDifferentExternalVendors() {
-    // Platform default baseline
-    var baseConfig = BreakerConfig.of(5, Duration.ofSeconds(30));
+  @Nested
+  class Configuration {
 
-    // Profile 1: High-throughput, low-latency POS card payment rail
-    var posCardProfile =
-        BreakerConfig.from(baseConfig).withFailures(3).withProbeAfter(Duration.ofSeconds(3));
-    assertThat(posCardProfile.failures()).isEqualTo(3);
-    assertThat(posCardProfile.probeAfter()).isEqualTo(Duration.ofSeconds(3));
+    @Test
+    void derivesProfilesFromABase() {
+      var base = BreakerConfig.of(5, Duration.ofSeconds(30));
+      var cards = base.withName("cards").withFailures(3).withProbeAfter(Duration.ofSeconds(3));
 
-    // Profile 2: Background SMS / notification aggregator
-    var smsProfile =
-        BreakerConfig.from(baseConfig).withFailures(5).withProbeAfter(Duration.ofSeconds(15));
-    assertThat(smsProfile.failures()).isEqualTo(5);
-    assertThat(smsProfile.probeAfter()).isEqualTo(Duration.ofSeconds(15));
+      assertThat(base).isEqualTo(BreakerConfig.of(5, Duration.ofSeconds(30)));
+      assertThat(cards.name()).isEqualTo("cards");
+      assertThat(cards.failures()).isEqualTo(3);
+      assertThat(cards.probeAfter()).isEqualTo(Duration.ofSeconds(3));
+      assertThat(cards.failurePredicate()).isSameAs(base.failurePredicate());
 
-    // Profile 3: Batch accounting / ledger synchronization
-    var batchProfile =
-        BreakerConfig.from(baseConfig).withFailures(10).withProbeAfter(Duration.ofMinutes(1));
-    assertThat(batchProfile.failures()).isEqualTo(10);
-    assertThat(batchProfile.probeAfter()).isEqualTo(Duration.ofMinutes(1));
+      var breaker = cards.create(clock);
+      assertThat(breaker.config()).isSameAs(cards);
+      assertThat(breaker.name()).isEqualTo("cards");
+      assertThat(cards.create().isClosed()).isTrue();
+    }
 
-    // Create instance with test clock or system clock
-    var liveBreaker = posCardProfile.create(clock);
-    assertThat(liveBreaker.failures()).isEqualTo(3);
-    assertThat(liveBreaker.probeAfter()).isEqualTo(Duration.ofSeconds(3));
+    @Test
+    void defaultsTheNameAndThePredicate() {
+      var config = BreakerConfig.of(5, Duration.ofSeconds(30));
 
-    var defaultSystemBreaker = smsProfile.create();
-    assertThat(defaultSystemBreaker.failures()).isEqualTo(5);
+      assertThat(config.name()).isEqualTo(BreakerConstants.DEFAULT_BREAKER_NAME);
+      assertThat(config.failurePredicate().test(new ResourceAccessException("down"))).isTrue();
+    }
 
-    // Defensive parameter validation
-    assertThatThrownBy(() -> BreakerConfig.of(0, Duration.ofSeconds(30)))
-        .isInstanceOf(GeneralException.class);
-    assertThatThrownBy(() -> BreakerConfig.of(5, Duration.ZERO))
-        .isInstanceOf(GeneralException.class);
-  }
+    @Test
+    void refusesBadSettings() {
+      assertInvalid("failures", () -> BreakerConfig.of(0, Duration.ofSeconds(30)));
+      assertInvalid("probeAfter", () -> BreakerConfig.of(5, Duration.ZERO));
+      assertInvalid("probeAfter", () -> BreakerConfig.of(5, Duration.ofSeconds(-1)));
+      assertInvalid("name", () -> BreakerConfig.of(" ", 5, Duration.ofSeconds(30)));
+    }
 
-  @Test
-  void failurePredicatesClassifyInfrastructureVersusBusinessExceptions() {
-    assertThat(BreakerPredicates.isFailure(new IOException("Connection reset by peer"))).isTrue();
-    assertThat(BreakerPredicates.isFailure(new TimeoutException("Gateway timed out"))).isTrue();
-    assertThat(BreakerPredicates.isFailure(new ResourceAccessException("Socket timeout"))).isTrue();
-    assertThat(
-            BreakerPredicates.isFailure(
-                new HttpServerErrorException(HttpStatus.INTERNAL_SERVER_ERROR)))
-        .isTrue();
-    assertThat(BreakerPredicates.isFailure(new HttpServerErrorException(HttpStatus.BAD_GATEWAY)))
-        .isTrue();
-    assertThat(
-            BreakerPredicates.isFailure(
-                new HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE)))
-        .isTrue();
-
-    // Client and business errors must not be treated as transport failures
-    assertThat(BreakerPredicates.isFailure(new HttpClientErrorException(HttpStatus.BAD_REQUEST)))
-        .isFalse();
-    assertThat(
-            BreakerPredicates.isFailure(
-                new HttpClientErrorException(HttpStatus.UNPROCESSABLE_CONTENT)))
-        .isFalse();
-    assertThat(BreakerPredicates.isFailure(new HttpClientErrorException(HttpStatus.UNAUTHORIZED)))
-        .isFalse();
-    assertThat(BreakerPredicates.isFailure(new IllegalArgumentException("Invalid payload")))
-        .isFalse();
-
-    assertThat(BreakerPredicates.isFailure(new RuntimeException(new IOException("broken pipe"))))
-        .isTrue();
-  }
-
-  @Test
-  void runExecutesVoidOperationsSafely() {
-    var breaker = new Breaker(3, Duration.ofSeconds(5), clock);
-    var count = new AtomicInteger();
-    breaker.run(count::incrementAndGet);
-    assertThat(count).hasValue(1);
-    assertThat(breaker.isClosed()).isTrue();
+    private void assertInvalid(String setting, Runnable create) {
+      assertThatThrownBy(create::run)
+          .isInstanceOfSatisfying(
+              GeneralException.class,
+              invalid -> {
+                assertThat(invalid.getStatus()).isEqualTo(ErrorExceptionStatus.INTERNAL_ERROR);
+                assertThat(invalid.getSubErrors())
+                    .extracting(GeneralException.SubError::code)
+                    .containsExactly(setting);
+              });
+    }
   }
 }
