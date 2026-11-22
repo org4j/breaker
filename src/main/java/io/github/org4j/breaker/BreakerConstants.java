@@ -1,9 +1,9 @@
 package io.github.org4j.breaker;
 
+/** The breaker's default name and the names of its meters and tags. */
 public final class BreakerConstants {
 
-  private BreakerConstants() {}
-
+  /** The name of a breaker whose config sets none. */
   public static final String DEFAULT_BREAKER_NAME = "default";
 
   public static final String BREAKER_STATE_METRIC = "org4j.breaker.state";
@@ -17,4 +17,6 @@ public final class BreakerConstants {
   public static final String RESULT_SUCCESS = "success";
   public static final String RESULT_FAILURE = "failure";
   public static final String RESULT_REJECTED = "rejected";
+
+  private BreakerConstants() {}
 }

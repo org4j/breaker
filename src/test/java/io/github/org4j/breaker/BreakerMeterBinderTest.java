@@ -1,5 +1,14 @@
 package io.github.org4j.breaker;
 
+import static io.github.org4j.breaker.BreakerConstants.BREAKER_CALLS_METRIC;
+import static io.github.org4j.breaker.BreakerConstants.BREAKER_FAILURES_METRIC;
+import static io.github.org4j.breaker.BreakerConstants.BREAKER_STATE_METRIC;
+import static io.github.org4j.breaker.BreakerConstants.BREAKER_THRESHOLD_METRIC;
+import static io.github.org4j.breaker.BreakerConstants.NAME_TAG;
+import static io.github.org4j.breaker.BreakerConstants.RESULT_FAILURE;
+import static io.github.org4j.breaker.BreakerConstants.RESULT_REJECTED;
+import static io.github.org4j.breaker.BreakerConstants.RESULT_SUCCESS;
+import static io.github.org4j.breaker.BreakerConstants.RESULT_TAG;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -8,70 +17,35 @@ import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.ResourceAccessException;
 
 class BreakerMeterBinderTest {
 
-  final BreakerTest.TestClock clock = new BreakerTest.TestClock();
+  private final TestClock clock = new TestClock();
+  private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
+  private final Breaker breaker = BreakerConfig.of("sms", 2, Duration.ofSeconds(10)).create(clock);
 
-  @Test
-  void bindsMetersAndTracksLifecycleAccurately() {
-    var registry = new SimpleMeterRegistry();
-    var breaker = new Breaker("test-gateway", 2, Duration.ofSeconds(10), clock);
-    var binder = new BreakerMeterBinder(breaker, List.of(Tag.of("region", "uz")));
-    binder.bindTo(registry);
+  @BeforeEach
+  void bind() {
+    new BreakerMeterBinder(breaker, List.of(Tag.of("region", "uz"))).bindTo(registry);
+  }
 
-    // Initial state
-    var stateGauge =
-        registry
-            .get(BreakerConstants.BREAKER_STATE_METRIC)
-            .tag(BreakerConstants.NAME_TAG, "test-gateway")
-            .tag("region", "uz")
-            .gauge();
-    var failuresGauge =
-        registry
-            .get(BreakerConstants.BREAKER_FAILURES_METRIC)
-            .tag(BreakerConstants.NAME_TAG, "test-gateway")
-            .gauge();
-    var thresholdGauge =
-        registry
-            .get(BreakerConstants.BREAKER_THRESHOLD_METRIC)
-            .tag(BreakerConstants.NAME_TAG, "test-gateway")
-            .gauge();
+  private double gauge(String metric) {
+    return registry.get(metric).tag(NAME_TAG, "sms").tag("region", "uz").gauge().value();
+  }
 
-    var successCounter =
-        registry
-            .get(BreakerConstants.BREAKER_CALLS_METRIC)
-            .tag(BreakerConstants.NAME_TAG, "test-gateway")
-            .tag(BreakerConstants.RESULT_TAG, BreakerConstants.RESULT_SUCCESS)
-            .functionCounter();
-    var failureCounter =
-        registry
-            .get(BreakerConstants.BREAKER_CALLS_METRIC)
-            .tag(BreakerConstants.NAME_TAG, "test-gateway")
-            .tag(BreakerConstants.RESULT_TAG, BreakerConstants.RESULT_FAILURE)
-            .functionCounter();
-    var rejectedCounter =
-        registry
-            .get(BreakerConstants.BREAKER_CALLS_METRIC)
-            .tag(BreakerConstants.NAME_TAG, "test-gateway")
-            .tag(BreakerConstants.RESULT_TAG, BreakerConstants.RESULT_REJECTED)
-            .functionCounter();
+  private double calls(String result) {
+    return registry
+        .get(BREAKER_CALLS_METRIC)
+        .tag(NAME_TAG, "sms")
+        .tag(RESULT_TAG, result)
+        .functionCounter()
+        .count();
+  }
 
-    assertThat(stateGauge.value()).isEqualTo(0.0); // CLOSED
-    assertThat(failuresGauge.value()).isEqualTo(0.0);
-    assertThat(thresholdGauge.value()).isEqualTo(2.0);
-    assertThat(successCounter.count()).isEqualTo(0.0);
-    assertThat(failureCounter.count()).isEqualTo(0.0);
-    assertThat(rejectedCounter.count()).isEqualTo(0.0);
-
-    // 1. Success call
-    breaker.execute(() -> "ok");
-    assertThat(successCounter.count()).isEqualTo(1.0);
-    assertThat(stateGauge.value()).isEqualTo(0.0);
-
-    // 2. 1st Failure
+  private void fail() {
     assertThatThrownBy(
             () ->
                 breaker.execute(
@@ -79,35 +53,40 @@ class BreakerMeterBinderTest {
                       throw new ResourceAccessException("down");
                     }))
         .isInstanceOf(ResourceAccessException.class);
-    assertThat(failureCounter.count()).isEqualTo(1.0);
-    assertThat(failuresGauge.value()).isEqualTo(1.0);
-    assertThat(stateGauge.value()).isEqualTo(0.0);
+  }
 
-    // 3. 2nd Failure trips the breaker to OPEN
-    assertThatThrownBy(
-            () ->
-                breaker.execute(
-                    () -> {
-                      throw new ResourceAccessException("down again");
-                    }))
-        .isInstanceOf(ResourceAccessException.class);
-    assertThat(failureCounter.count()).isEqualTo(2.0);
-    assertThat(failuresGauge.value()).isEqualTo(2.0);
-    assertThat(stateGauge.value()).isEqualTo(2.0); // OPEN
+  @Test
+  void startsClosedWithNothingCounted() {
+    assertThat(gauge(BREAKER_STATE_METRIC)).isZero();
+    assertThat(gauge(BREAKER_FAILURES_METRIC)).isZero();
+    assertThat(gauge(BREAKER_THRESHOLD_METRIC)).isEqualTo(2);
+    assertThat(calls(RESULT_SUCCESS)).isZero();
+    assertThat(calls(RESULT_FAILURE)).isZero();
+    assertThat(calls(RESULT_REJECTED)).isZero();
+  }
 
-    // 4. Rejected call while OPEN
-    assertThatThrownBy(() -> breaker.execute(() -> "never")).isInstanceOf(GeneralException.class);
-    assertThat(rejectedCounter.count()).isEqualTo(1.0);
+  @Test
+  void followsTheBreakerThroughItsCycle() {
+    breaker.execute(() -> "ok");
+    fail();
+    assertThat(calls(RESULT_SUCCESS)).isEqualTo(1);
+    assertThat(calls(RESULT_FAILURE)).isEqualTo(1);
+    assertThat(gauge(BREAKER_FAILURES_METRIC)).isEqualTo(1);
+    assertThat(gauge(BREAKER_STATE_METRIC)).as("closed").isZero();
 
-    // 5. Advance clock beyond probe delay -> probe transitions to HALF_OPEN
-    clock.now = clock.now.plus(Duration.ofSeconds(15));
+    fail();
+    assertThat(gauge(BREAKER_STATE_METRIC)).as("open").isEqualTo(2);
+
+    assertThatThrownBy(() -> breaker.execute(() -> "shed")).isInstanceOf(GeneralException.class);
+    assertThat(calls(RESULT_REJECTED)).isEqualTo(1);
+
+    clock.advance(Duration.ofSeconds(10));
     breaker.tryAcquire();
-    assertThat(stateGauge.value()).isEqualTo(1.0); // HALF_OPEN
+    assertThat(gauge(BREAKER_STATE_METRIC)).as("half-open").isEqualTo(1);
 
-    // 6. Record success in probe -> recovers to CLOSED
     breaker.recordSuccess();
-    assertThat(stateGauge.value()).isEqualTo(0.0); // CLOSED
-    assertThat(failuresGauge.value()).isEqualTo(0.0);
-    assertThat(successCounter.count()).isEqualTo(2.0);
+    assertThat(gauge(BREAKER_STATE_METRIC)).as("closed").isZero();
+    assertThat(gauge(BREAKER_FAILURES_METRIC)).isZero();
+    assertThat(calls(RESULT_SUCCESS)).isEqualTo(2);
   }
 }

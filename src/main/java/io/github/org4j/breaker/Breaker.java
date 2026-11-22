@@ -1,6 +1,5 @@
 package io.github.org4j.breaker;
 
-import io.github.org4j.error.ErrorExceptionStatus;
 import io.github.org4j.error.GeneralException;
 import java.time.Clock;
 import java.time.Duration;
@@ -11,97 +10,73 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
 
+/**
+ * A circuit breaker for one outside system: it opens after {@link BreakerConfig#failures()}
+ * failures in a row, sheds calls while open, and after {@link BreakerConfig#probeAfter()} lets one
+ * probe through to see whether the system is back.
+ *
+ * <ul>
+ *   <li>{@link State#CLOSED CLOSED}: every call is admitted.
+ *   <li>{@link State#OPEN OPEN}: calls are refused until the cooldown ends.
+ *   <li>{@link State#HALF_OPEN HALF_OPEN}: one probe is in flight; other calls are refused. A
+ *       success closes the breaker, a failure opens it again for a new cooldown, and a probe that
+ *       never reports back is replaced after another {@code probeAfter}.
+ * </ul>
+ *
+ * <p>Use {@link #execute} or {@link #run} around a call, or {@link #tryAcquire} and the {@code
+ * record} methods to drive it by hand. Made by {@link BreakerConfig#create()}; thread-safe.
+ *
+ * {@snippet :
+ * var breaker = BreakerConfig.of("sms", 5, Duration.ofSeconds(15)).create();
+ * var messageId = breaker.execute(() -> smsClient.send(otp));
+ * }
+ */
 public final class Breaker {
 
+  /** Where a breaker is in its cycle. */
   public enum State {
     CLOSED,
     OPEN,
     HALF_OPEN
   }
 
-  private final String name;
-  private final int failures;
-  private final Duration probeAfter;
+  private final BreakerConfig config;
   private final Clock clock;
-  private final Predicate<Throwable> failurePredicate;
-  private int failuresInARow;
-  private @Nullable Instant openedAt;
-  private boolean probing;
   private final AtomicLong successfulCalls = new AtomicLong();
   private final AtomicLong failedCalls = new AtomicLong();
   private final AtomicLong rejectedCalls = new AtomicLong();
 
-  public Breaker(int failures, Duration probeAfter) {
-    this(
-        BreakerConstants.DEFAULT_BREAKER_NAME,
-        failures,
-        probeAfter,
-        Clock.systemUTC(),
-        BreakerPredicates.defaultPredicate());
-  }
+  private int failuresInARow;
+  private @Nullable Instant openedAt;
+  private boolean probing;
 
-  public Breaker(String name, int failures, Duration probeAfter) {
-    this(name, failures, probeAfter, Clock.systemUTC(), BreakerPredicates.defaultPredicate());
-  }
-
-  public Breaker(int failures, Duration probeAfter, Clock clock) {
-    this(
-        BreakerConstants.DEFAULT_BREAKER_NAME,
-        failures,
-        probeAfter,
-        clock,
-        BreakerPredicates.defaultPredicate());
-  }
-
-  public Breaker(String name, int failures, Duration probeAfter, Clock clock) {
-    this(name, failures, probeAfter, clock, BreakerPredicates.defaultPredicate());
-  }
-
-  public Breaker(
-      int failures, Duration probeAfter, Clock clock, Predicate<Throwable> failurePredicate) {
-    this(BreakerConstants.DEFAULT_BREAKER_NAME, failures, probeAfter, clock, failurePredicate);
-  }
-
-  public Breaker(
-      String name,
-      int failures,
-      Duration probeAfter,
-      Clock clock,
-      Predicate<Throwable> failurePredicate) {
-    Objects.requireNonNull(name, "name must not be null");
-    if (name.isBlank()) {
-      throw new GeneralException(ErrorExceptionStatus.INTERNAL_ERROR)
-          .subError("name", "must not be blank");
-    }
-    if (failures < 1) {
-      throw new GeneralException(ErrorExceptionStatus.INTERNAL_ERROR)
-          .subError("failures", "must be at least 1, not " + failures);
-    }
-    if (!probeAfter.isPositive()) {
-      throw new GeneralException(ErrorExceptionStatus.INTERNAL_ERROR)
-          .subError("probeAfter", "must be positive, not " + probeAfter);
-    }
-    this.name = name;
-    this.failures = failures;
-    this.probeAfter = probeAfter;
+  Breaker(BreakerConfig config, Clock clock) {
+    this.config = Objects.requireNonNull(config, "config must not be null");
     this.clock = Objects.requireNonNull(clock, "clock must not be null");
-    this.failurePredicate =
-        Objects.requireNonNull(failurePredicate, "failurePredicate must not be null");
   }
 
+  /**
+   * Asks to make a call. Admits every call while closed; once the cooldown has ended, admits one
+   * probe and moves to {@code HALF_OPEN}. A refusal is counted in {@link #rejectedCalls()}.
+   *
+   * @return {@code true} if the call may go ahead; it must then be reported with {@link
+   *     #recordSuccess()} or {@link #recordFailure()}
+   */
   public synchronized boolean tryAcquire() {
     if (openedAt == null) {
       return true;
     }
-    if (!clock.instant().isBefore(openedAt.plus(probeAfter))) {
+    var now = clock.instant();
+    if (!now.isBefore(openedAt.plus(config.probeAfter()))) {
       probing = true;
-      openedAt = clock.instant();
+      openedAt = now;
       return true;
     }
     rejectedCalls.incrementAndGet();
     return false;
   }
 
+  /** Reports that the system answered: the failure count is reset and the breaker closes. */
   public synchronized void recordSuccess() {
     failuresInARow = 0;
     openedAt = null;
@@ -109,56 +84,78 @@ public final class Breaker {
     successfulCalls.incrementAndGet();
   }
 
+  /**
+   * Reports that the system failed. The breaker opens on the {@code failures}-th failure in a row,
+   * or on a failed probe, and the cooldown starts again.
+   */
   public synchronized void recordFailure() {
     failuresInARow++;
     failedCalls.incrementAndGet();
-    if (probing || failuresInARow >= failures) {
+    if (probing || failuresInARow >= config.failures()) {
       openedAt = clock.instant();
       probing = false;
     }
   }
 
-  public void recordFailure(Throwable throwable) {
-    if (failurePredicate.test(throwable)) {
-      recordFailure();
-    } else {
-      recordSuccess();
-    }
+  /**
+   * Reports a call that threw: a {@linkplain #recordFailure() failure} when the configured
+   * predicate blames the system, a {@linkplain #recordSuccess() success} otherwise (a 4xx answer
+   * still means the system is up).
+   *
+   * @param error what the call threw
+   */
+  public void recordError(Throwable error) {
+    recordError(error, config.failurePredicate());
   }
 
+  /**
+   * Runs an action through the breaker, with the configured failure predicate.
+   *
+   * @see #execute(Supplier, Predicate)
+   */
   public <T> T execute(Supplier<T> action) {
-    return execute(action, failurePredicate);
+    return execute(action, config.failurePredicate());
   }
 
+  /**
+   * Runs an action through the breaker: refuses it while open, otherwise runs it and records the
+   * outcome. Whatever the action throws is rethrown unchanged.
+   *
+   * @param action the call to the outside system
+   * @param isFailure which of the action's exceptions count as the system's failures, for this call
+   * @return what the action returned
+   * @throws GeneralException {@link BreakerExceptionStatus#BREAKER_OPEN} (503) when refused, with
+   *     {@code Retry-After} set to the rest of the cooldown
+   */
   public <T> T execute(Supplier<T> action, Predicate<Throwable> isFailure) {
     if (!tryAcquire()) {
-      Duration retry = remainingProbeDelay();
-      if (retry.isZero()) {
-        retry = probeAfter;
-      }
-      throw new GeneralException(BreakerExceptionStatus.BREAKER_OPEN)
-          .subError("breaker", "open")
-          .retryAfter(retry);
+      throw refused();
     }
     T result;
     try {
       result = action.get();
-    } catch (RuntimeException | Error ex) {
-      if (isFailure.test(ex)) {
-        recordFailure();
-      } else {
-        recordSuccess();
-      }
-      throw ex;
+    } catch (Throwable error) {
+      recordError(error, isFailure);
+      throw error;
     }
     recordSuccess();
     return result;
   }
 
+  /**
+   * Runs an action with no result through the breaker, with the configured failure predicate.
+   *
+   * @see #execute(Supplier, Predicate)
+   */
   public void run(Runnable action) {
-    run(action, failurePredicate);
+    run(action, config.failurePredicate());
   }
 
+  /**
+   * Runs an action with no result through the breaker.
+   *
+   * @see #execute(Supplier, Predicate)
+   */
   public void run(Runnable action, Predicate<Throwable> isFailure) {
     execute(
         () -> {
@@ -172,46 +169,41 @@ public final class Breaker {
     if (openedAt == null) {
       return State.CLOSED;
     }
-    if (probing) {
-      return State.HALF_OPEN;
-    }
-    return State.OPEN;
+    return probing ? State.HALF_OPEN : State.OPEN;
   }
 
-  public synchronized boolean isOpen() {
-    return state() == State.OPEN;
-  }
-
-  public synchronized boolean isClosed() {
+  public boolean isClosed() {
     return state() == State.CLOSED;
   }
 
-  public synchronized boolean isHalfOpen() {
+  public boolean isOpen() {
+    return state() == State.OPEN;
+  }
+
+  public boolean isHalfOpen() {
     return state() == State.HALF_OPEN;
   }
 
+  /**
+   * Tells how long until the next probe is admitted.
+   *
+   * @return the rest of the cooldown, or of the probe in flight; zero when closed or when a probe
+   *     may go now
+   */
   public synchronized Duration remainingProbeDelay() {
     if (openedAt == null) {
       return Duration.ZERO;
     }
-    Duration remaining = Duration.between(clock.instant(), openedAt.plus(probeAfter));
+    var remaining = Duration.between(clock.instant(), openedAt.plus(config.probeAfter()));
     return remaining.isNegative() ? Duration.ZERO : remaining;
   }
 
-  public int failures() {
-    return failures;
-  }
-
-  public Duration probeAfter() {
-    return probeAfter;
-  }
-
-  public Predicate<Throwable> failurePredicate() {
-    return failurePredicate;
+  public BreakerConfig config() {
+    return config;
   }
 
   public String name() {
-    return name;
+    return config.name();
   }
 
   public synchronized int consecutiveFailures() {
@@ -226,7 +218,25 @@ public final class Breaker {
     return failedCalls.get();
   }
 
+  /** Calls refused by {@link #tryAcquire()} while open or probing. */
   public long rejectedCalls() {
     return rejectedCalls.get();
+  }
+
+  private void recordError(Throwable error, Predicate<Throwable> isFailure) {
+    if (isFailure.test(error)) {
+      recordFailure();
+    } else {
+      recordSuccess();
+    }
+  }
+
+  private GeneralException refused() {
+    var wait = remainingProbeDelay();
+    // Zero when the cooldown ended between tryAcquire and here; never tell a client to retry at
+    // once.
+    return new GeneralException(BreakerExceptionStatus.BREAKER_OPEN)
+        .subError("breaker", "open")
+        .retryAfter(wait.isZero() ? config.probeAfter() : wait);
   }
 }

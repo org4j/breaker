@@ -1,65 +1,51 @@
 # breaker
 
-A circuit breaker for any external network-bound integration (SMS notification aggregators, identity
-providers, payment schemes, or core banking hosts). Plain Java besides the error library, zero external
-dependencies: the service configures it from its own settings and registers its own gauge.
+A circuit breaker for one outside system: an SMS aggregator, an identity provider, a payment scheme,
+a core banking host. Plain Java on top of the error library: no beans and no properties, so a
+service builds each breaker from its own settings.
 
 ```groovy
 implementation libs.breaker
 ```
 
-After `failures` consecutive failures in a row the circuit transitions to `OPEN`: `tryAcquire()` returns
-`false` and calls are shed in $<1\text{ms}$. After `probeAfter`, exactly one canary call is admitted in
-`HALF_OPEN` state. `recordSuccess()` closes the breaker (`CLOSED`), `recordFailure()` returns it to `OPEN`
-renewing the cooldown, and an abandoned probe is retried after the next `probeAfter`.
+### How it behaves
 
-The breaker reports its tri-state lifecycle (`Breaker.State`): `CLOSED` (healthy), `OPEN` (load-shedding),
-and `HALF_OPEN` (probing single canary request). `breaker.state()` gives the state; `isClosed()`, `isOpen()`,
-and `isHalfOpen()` query it.
+| State | Calls | Leaves when |
+|---|---|---|
+| `CLOSED` | all admitted | `failures` failures in a row: `OPEN` |
+| `OPEN` | refused with `BREAKER_OPEN` | `probeAfter` has passed: the next call is a probe, `HALF_OPEN` |
+| `HALF_OPEN` | the probe only | the probe succeeds: `CLOSED`; fails: `OPEN` for a new `probeAfter`; never reports back: a new probe after `probeAfter` |
 
-## Execution wrappers
+A refusal is a `GeneralException(BREAKER_OPEN)`: HTTP 503, messages in English, Russian and Uzbek,
+and `Retry-After` set to the rest of the cooldown.
 
-`breaker.execute(action)` runs a `Supplier<T>` through the breaker: it checks admission via `tryAcquire()`,
-executes the action, records success on completion, and on error tests `BreakerPredicates.DEFAULT`. Socket drops,
-timeouts, and 5xx server errors call `recordFailure()`; 4xx client errors call `recordSuccess()` (invalid phone
-numbers, bad PINs, or expired cards never trip the rail). `breaker.run(action)` works identically for `void` calls.
-
-```java
-// SMS notification dispatch
-var messageId = smsBreaker.execute(() -> smsBrokerClient.send(otpNotification));
-
-// Payment scheme card authorization
-var authResult = paymentBreaker.execute(() -> schemeClient.authorize(payment));
-
-// Keycloak / OAuth IDP userinfo validation
-var userClaims = authBreaker.execute(() -> idpClient.fetchUserInfo(token));
-```
-
-When `OPEN`, execution wrappers throw `GeneralException(BREAKER_OPEN)` with HTTP status 503, localized error
-messages in English, Russian, and Uzbek, and a dynamic `Retry-After` header reflecting remaining cooldown seconds.
-
-## Configuration prototype
-
-`BreakerConfig` defines baseline defaults and immutable prototype derivations:
+What counts as a failure is the config's predicate, `BreakerPredicates.defaultPredicate()` unless
+set. It searches the exception's cause chain: transport problems (`IOException`, `TimeoutException`,
+`ResourceAccessException`) and 5xx responses are failures; a 4xx is the system answering (a bad PIN
+or an unknown phone number never opens the breaker) and counts as a success.
 
 ```java
-// org4j baseline
 var base = BreakerConfig.of(5, Duration.ofSeconds(30));
+var cards = base.withName("cards").withFailures(3).withProbeAfter(Duration.ofSeconds(3)).create();
+var sms = base.withName("sms").withProbeAfter(Duration.ofSeconds(15)).create();
 
-// Profile for low-latency POS card payment rails (3 failures, 3s probe)
-var posPaymentRail = BreakerConfig.from(base)
-    .withFailures(3)
-    .withProbeAfter(Duration.ofSeconds(3));
-
-// Profile for background SMS notification dispatchers (5 failures, 15s probe)
-var smsBrokerRail = BreakerConfig.from(base)
-    .withFailures(5)
-    .withProbeAfter(Duration.ofSeconds(15));
-
-var breaker = posPaymentRail.create(); // or create(clock) for testing
-Gauge.builder("<system>.breaker.state", breaker, b -> b.state().ordinal()).register(registry);
+var auth = cards.execute(() -> schemeClient.authorize(payment));
+sms.run(() -> smsClient.send(otp));
+sms.execute(() -> smsClient.status(id), BreakerPredicates.defaultPredicate().or(Throttled.class::isInstance));
 ```
+
+`tryAcquire()`, `recordSuccess()`, `recordFailure()` and `recordError(throwable)` drive a breaker by
+hand, for calls that do not fit a `Supplier`. `create(clock)` takes a test clock.
+
+### Metrics
+
+`new BreakerMeterBinder(breaker).bindTo(registry)` publishes, tagged `name=<breaker name>`:
+`org4j.breaker.state` (0 closed, 1 half-open, 2 open), `org4j.breaker.consecutive-failures`,
+`org4j.breaker.failure-threshold`, and `org4j.breaker.calls` by `result` (`success`, `failure`,
+`rejected`). Micrometer is the service's own dependency.
 
 ## Tests
 
-Unit tests only (`./gradlew test`): the breaker has no external infrastructure dependencies.
+Unit tests only (`./gradlew test`): the breaker has no infrastructure dependencies. `BreakerTest` is
+the specification, one nested group per behaviour: closed, open, half-open, execution, failure
+classification and configuration. `BreakerMeterBinderTest` covers the meters.
